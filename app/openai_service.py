@@ -67,8 +67,26 @@ def get_response_from_openai(
         
         logger.info(f"Enviando petición a OpenRouter (modelo: {model or MODEL_NAME})")
 
-        # Configurar mensajes
-        messages = [{"role": "user", "content": texto_safe}]
+        # Configurar mensajes con contexto
+        system_prompt = """
+        Eres un asistente virtual amable y profesional para "Hilo Mágico", un e-commerce de ropa.
+        Tu objetivo es ayudar a los clientes con sus consultas sobre productos, tallas, colores, materiales,
+        políticas de envío, devoluciones y cualquier otra pregunta relacionada con la tienda.
+        
+        Información importante:
+        - Envíos a todo el país con entrega en 3-5 días hábiles
+        - Devoluciones gratuitas hasta 30 días después de la compra
+        - Tallas disponibles: XS, S, M, L, XL
+        - Métodos de pago: Tarjeta de crédito/débito, PayPal, Transferencia bancaria
+        
+        Sé cordial, mantén un tono amigable y profesional, y proporciona información clara y concisa.
+        Si no estás seguro de algo, indícalo amablemente.
+        """
+        
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": texto_safe}
+        ]
 
         # Parámetros de la petición
         params = {
