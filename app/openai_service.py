@@ -1,133 +1,115 @@
 # -*- coding: utf-8 -*-
 import os
 import logging
-from typing import Union, Dict, Any, Optional
-from openai import OpenAI
+import json
+from typing import Union, Dict, Any
 from dotenv import load_dotenv
+from openai import OpenAI
+import httpx
 
 # Cargar variables de entorno
 load_dotenv()
 
-# Configurar logs
+# Configurar logging
 logging.basicConfig(
-    level=os.getenv("LOG_LEVEL", "INFO"),
+    level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
-# Configuración
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
-MODEL_NAME = os.getenv("MODEL_NAME", "deepseek/deepseek-r1:free")
+def get_openai_client():
+    """Crea y retorna un cliente de OpenAI con configuración segura."""
+    return OpenAI(
+        base_url="https://openrouter.ai/api/v1",
+        api_key=os.getenv("OPENROUTER_API_KEY"),
+        http_client=httpx.Client(
+            headers={
+                "HTTP-Referer": "http://localhost:8000",
+                "X-Title": "Hilo Magico Chatbot"
+            },
+            timeout=30.0
+        )
+    )
 
-if not OPENROUTER_API_KEY:
-    logger.warning("No se encontró OPENROUTER_API_KEY en las variables de entorno")
+client = get_openai_client()
 
-# Cliente OpenRouter
-client = OpenAI(
-    base_url="https://openrouter.ai/api/v1",
-    api_key=OPENROUTER_API_KEY or ""
-)
-
-def ensure_unicode(text: Union[str, bytes]) -> str:
-    """Convierte texto a string unicode seguro."""
-    if isinstance(text, bytes):
-        try:
-            return text.decode('utf-8')
-        except UnicodeDecodeError:
-            return text.decode('latin-1', errors='ignore')
-    return str(text)
-
-def get_response_from_openai(
-    texto: Union[str, bytes],
-    model: Optional[str] = None,
-    temperature: float = 0.7,
-    **kwargs
-) -> str:
+def sanitize_text(text: Union[str, bytes]) -> str:
     """
-    Envía texto a la API de OpenRouter y devuelve la respuesta generada.
+    Asegura que el texto sea UTF-8 válido y mantiene los caracteres especiales del español.
     
     Args:
-        texto: Texto a enviar al modelo
-        model: Nombre del modelo a usar (opcional, usa el de configuración por defecto)
-        temperature: Controla la aleatoriedad de la respuesta (0-2)
-        **kwargs: Argumentos adicionales para la API
+        text: Texto a limpiar (puede ser str o bytes)
         
     Returns:
-        str: Respuesta generada por el modelo o mensaje de error
+        str: Texto limpio con codificación UTF-8 válida
+    """
+    if not text:
+        return ""
+        
+    # Convertir a string si es necesario
+    if isinstance(text, bytes):
+        try:
+            text = text.decode('utf-8')
+        except UnicodeDecodeError:
+            try:
+                text = text.decode('latin-1')
+            except Exception:
+                text = str(text, errors='replace')
+    
+    # Asegurar que sea string
+    text = str(text)
+    
+    # Reemplazar caracteres de control pero mantener caracteres especiales
+    import re
+    text = re.sub(r'[\x00-\x1f\x7f-\x9f]', '', text)
+    
+    return text.strip()
+
+def get_response_from_openai(texto: Union[str, bytes], temperature: float = 0.7) -> str:
+    """
+    Envía un mensaje al modelo de lenguaje y devuelve la respuesta.
+    
+    Args:
+        texto: Texto del usuario
+        temperature: Temperatura del modelo IA (0.0 a 1.0)
+    
+    Returns:
+        str: Respuesta del modelo o mensaje de error.
     """
     try:
-        if not OPENROUTER_API_KEY:
-            error_msg = "No se configuró OPENROUTER_API_KEY"
-            logger.error(error_msg)
-            return error_msg
-
-        # Procesar texto de entrada
-        texto_unicode = ensure_unicode(texto)
-        texto_safe = texto_unicode.encode('utf-8', 'ignore').decode('utf-8')
+        # Limpiar y asegurar el texto de entrada
+        texto_limpio = sanitize_text(texto)
+        logger.info("Enviando petición a OpenRouter")
         
-        logger.info(f"Enviando petición a OpenRouter (modelo: {model or MODEL_NAME})")
-
-        # Configurar mensajes con contexto neutral
-        system_prompt = """
-        Eres un asistente de IA útil, amable y versátil. Tu objetivo es asistir al usuario de la mejor 
-        manera posible, sin importar el tema de la consulta. 
-        
-        Por favor, sigue estas pautas:
-        1. Sé claro y conciso en tus respuestas
-        2. Si no estás seguro de algo, admítelo abiertamente
-        3. Mantén un tono amable y profesional
-        4. Proporciona información precisa y útil
-        5. Si la consulta es ambigua, pide aclaraciones
-        6. No asumas información que no te han proporcionado
-        
-        Estás aquí para ayudar con cualquier tema, pregunta o consulta que el usuario pueda tener.
-        """
-
-        system_prompt_for_thread = """ 
-        Te llamas MagiBot, asegúrate de presentarte por tu nombre, eres un asistente virtual amable y
-        profesional para "Hilo Mágico", un e-commerce de ropa. Te presentas directamente sin poner en el
-        texto tu nombre es decir por ejemplo "Hola, soy MagiBot, tu asistente virtual de Hilo Mágico".
-        Esto de aquí "**HiloBot:**  \n", ya no va
-        Tu objetivo es ayudar a los clientes con sus consultas sobre productos, tallas, colores, materiales,
-        políticas de envío, devoluciones y cualquier otra pregunta relacionada con la tienda.
-        
-        Información importante:
-        - Envíos a todo el país con entrega en 3-5 días hábiles
-        - Devoluciones gratuitas hasta 30 días después de la compra
-        - Tallas disponibles: XS, S, M, L, XL
-        - Métodos de pago: Tarjeta de crédito/débito, Stripe, Transferencia bancaria, Pagos por QR
-        
-        Sé cordial, mantén un tono amigable y profesional, y proporciona información clara y concisa.
-        Si no estás seguro de algo, indícalo amablemente.
-        """
-        
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": texto_safe}
-        ]
-
-        # Parámetros de la petición
-        params = {
-            "model": model or MODEL_NAME,
-            "messages": messages,
-            "temperature": min(max(0, temperature), 2),  # Asegurar valor entre 0 y 2
-            **kwargs
+        # Crear mensaje con rol de sistema
+        system_msg = {
+            "role": "system",
+            "content": "Eres un asistente útil llamado MagiBot que ayuda a los clientes de Hilo Mágico."
         }
-
-        # Llamar a la API
-        response = client.chat.completions.create(**params)
-
-        # Procesar respuesta
+        
+        # Crear mensaje del usuario
+        user_msg = {
+            "role": "user",
+            "content": texto_limpio
+        }
+        
+        # Realizar la petición a la API
+        response = client.chat.completions.create(
+            model="deepseek/deepseek-chat-v3-0324:free",
+            messages=[system_msg, user_msg],
+            temperature=min(max(0.0, float(temperature)), 1.0),  # Asegurar valor entre 0 y 1
+            max_tokens=500
+        )
+        
+        # Procesar la respuesta
         if response and hasattr(response, 'choices') and response.choices:
             result = response.choices[0].message.content
-            logger.info("Respuesta recibida exitosamente")
-            return result.encode('utf-8', 'ignore').decode('utf-8')
-
-        error_msg = "No se pudo generar una respuesta: respuesta inválida de la API"
-        logger.error(error_msg)
-        return error_msg
-
+            if result:
+                return sanitize_text(result)
+            
+        logger.warning("No se pudo generar una respuesta válida")
+        return "No pude generar una respuesta en este momento. ¿Podrías reformular tu pregunta?"
+        
     except Exception as e:
-        error_msg = f"Error en get_response_from_openai: {str(e)}"
-        logger.error(error_msg, exc_info=True)
-        return error_msg
+        logger.error(f"Error en la API: {str(e)}", exc_info=True)
+        return "Ocurrió un error al procesar tu solicitud. Por favor, inténtalo de nuevo."
