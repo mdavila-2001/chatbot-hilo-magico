@@ -35,7 +35,7 @@ client = get_openai_client()
 
 def sanitize_text(text: Union[str, bytes]) -> str:
     """
-    Asegura que el texto sea UTF-8 válido y mantiene los caracteres especiales del español.
+    Limpia y asegura que el texto sea UTF-8 válido, manteniendo caracteres en español.
     
     Args:
         text: Texto a limpiar (puede ser str o bytes)
@@ -61,7 +61,8 @@ def sanitize_text(text: Union[str, bytes]) -> str:
     
     # Reemplazar caracteres de control pero mantener caracteres especiales
     import re
-    text = re.sub(r'[\x00-\x1f\x7f-\x9f]', '', text)
+    # Eliminar caracteres de control (0x00-0x1F, 0x7F-0x9F) excepto saltos de línea
+    text = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F]', '', text)
     
     return text.strip()
 
@@ -95,10 +96,9 @@ def get_response_from_openai(texto: Union[str, bytes], temperature: float = 0.7)
         
         # Realizar la petición a la API
         response = client.chat.completions.create(
-            model="deepseek/deepseek-chat-v3-0324:free",
+            model=os.getenv("MODEL_NAME"),
             messages=[system_msg, user_msg],
             temperature=min(max(0.0, float(temperature)), 1.0),  # Asegurar valor entre 0 y 1
-            max_tokens=500
         )
         
         # Procesar la respuesta

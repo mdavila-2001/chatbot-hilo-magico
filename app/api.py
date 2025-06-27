@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 # Importar servicios
 from .openai_service import get_response_from_openai
 from .redis_service import guardar_contexto, obtener_contexto
+from .whatsapp_service import WhatsAppService
 
 # Crear el router
 router = APIRouter(
@@ -87,3 +88,16 @@ async def responder(mensaje: MessageRequest):
                 "message": str(e)
             }
         )
+
+# Endpoint para enviar saludo
+class WhatsAppSaludoRequest(BaseModel):
+    numero: str
+    nombre: str
+
+@router.post("/enviar-saludo")
+async def enviar_saludo(data: WhatsAppSaludoRequest):
+    resultado = WhatsAppService().enviar_template_saludo(
+        numero_usuario=data.numero,
+        nombre_usuario=data.nombre
+    )
+    return resultado
