@@ -85,7 +85,8 @@ def get_response_from_openai(texto: Union[str, bytes], temperature: float = 0.7)
         # Crear mensaje con rol de sistema
         system_msg = {
             "role": "system",
-            "content": "Eres un asistente útil llamado MagiBot que ayuda a los clientes de Hilo Mágico."
+            #"content": "Eres un asistente útil llamado MagiBot que ayuda a los clientes de Hilo Mágico."
+            "content": "Eres un asistente útil que responde preguntas de manera concisa y amable."
         }
         
         # Crear mensaje del usuario
