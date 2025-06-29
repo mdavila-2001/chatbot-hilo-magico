@@ -5,6 +5,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.api import router as api_router
 import uvicorn
+from app.whatsapp_webhook import router as whatsapp_router
 
 # Cargar variables de entorno
 load_dotenv()
@@ -29,6 +30,7 @@ app.add_middleware(
 
 # Incluir rutas del router
 app.include_router(api_router, prefix=os.getenv("API_PREFIX", "/api"))
+app.include_router(whatsapp_router, prefix=os.getenv("API_PREFIX", "/api"))
 
 if __name__ == "__main__":
     uvicorn.run(
