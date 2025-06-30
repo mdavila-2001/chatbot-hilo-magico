@@ -16,7 +16,7 @@ class MessageRequest(BaseModel):
 class MessageResponse(BaseModel):
     response: str
 
-@router.post("/responder", response_model=MessageResponse)
+@router.post("/v1/responder", response_model=MessageResponse)
 async def responder(mensaje: MessageRequest):
     try:
         logger.info(f"📨 Mensaje de {mensaje.user_id}: {mensaje.message}")
