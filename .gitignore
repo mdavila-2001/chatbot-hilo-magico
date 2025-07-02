@@ -48,3 +48,14 @@ logs/
 # Sistema operativo
 .DS_Store
 Thumbs.db
+
+# Archivos de Qdrant
+qdrant.db
+qdrant.log
+
+# Archivos de Redis
+redis.db
+redis.log
+
+# Directorios de archivos
+archivos/

@@ -2,7 +2,7 @@
 import os
 import logging
 import json
-from typing import Union, Dict, Any
+from typing import Union, Dict, Any, List
 from dotenv import load_dotenv
 from openai import OpenAI
 import httpx
@@ -114,3 +114,59 @@ def get_response_from_openai(texto: Union[str, bytes], temperature: float = 0.7)
     except Exception as e:
         logger.error(f"Error en la API: {str(e)}", exc_info=True)
         return "Ocurrió un error al procesar tu solicitud. Por favor, inténtalo de nuevo."
+
+# =========================
+# GENERAR EMBEDDINGS
+# =========================
+
+def get_embedding_from_openai(texto: str) -> List[float]:
+    """
+    Genera un embedding a partir de texto usando un modelo compatible con OpenRouter.
+    
+    Args:
+        texto: Texto para el cual generar el embedding
+        
+    Returns:
+        List[float]: Vector de embedding
+    """
+    try:
+        texto_limpio = sanitize_text(texto)
+        logger.info("🧬 Generando embedding para texto...")
+
+        # Lista de modelos de embedding a probar (en orden de preferencia)
+        embedding_models = [
+            "text-embedding-3-small",  # Modelo de embedding de OpenAI más reciente
+            "text-embedding-ada-002",  # Modelo de embedding de OpenAI anterior
+            "sentence-transformers/all-mpnet-base-v2",  # Alternativa popular
+            "hkunlp/instructor-large"  # Otra alternativa
+        ]
+
+        last_error = None
+        
+        for model in embedding_models:
+            try:
+                logger.info(f"🔍 Probando modelo de embedding: {model}")
+                response = client.embeddings.create(
+                    input=texto_limpio,
+                    model=model
+                )
+
+                if response and hasattr(response, 'data') and response.data:
+                    logger.info(f"✅ Modelo {model} funcionó correctamente")
+                    return response.data[0].embedding
+                    
+            except Exception as e:
+                last_error = e
+                logger.warning(f"⚠️ El modelo {model} falló: {str(e)}")
+                continue
+
+        # Si llegamos aquí, ningún modelo funcionó
+        if last_error:
+            logger.error("❌ Todos los modelos de embedding fallaron", exc_info=True)
+            raise RuntimeError(f"No se pudo generar el embedding con ningún modelo. Último error: {str(last_error)}")
+        else:
+            raise RuntimeError("No se pudo generar el embedding: respuesta de la API vacía")
+
+    except Exception as e:
+        logger.error(f"❌ Error al generar embedding: {str(e)}", exc_info=True)
+        raise RuntimeError(f"No se pudo generar el embedding: {str(e)}")

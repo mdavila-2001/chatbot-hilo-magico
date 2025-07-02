@@ -1,22 +1,22 @@
 from fastapi import APIRouter, Request, Body, status, HTTPException, Query
-from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi.responses import PlainTextResponse
 from typing import Optional
 import os
 import logging
 import requests
 from dotenv import load_dotenv
 from pydantic import BaseModel
-from app.openai_service import get_response_from_openai
+from app.openai_service import get_response_from_openai, get_embedding_from_openai
 from app.redis_service import guardar_contexto, obtener_contexto
+from app.vector_service import cargar_pdf_a_qdrant, buscar_en_documentos
+import uuid
 
 # Modelos Pydantic para documentación
 class WebhookVerificationResponse(BaseModel):
-    """Modelo para la respuesta de verificación del webhook"""
     status: str = "ok"
     challenge: Optional[int] = None
 
 class ErrorResponse(BaseModel):
-    """Modelo para respuestas de error"""
     status: str
     error: str
     message: Optional[str] = None
@@ -31,17 +31,17 @@ logger = logging.getLogger(__name__)
 router = APIRouter(
     tags=["WhatsApp"],
     responses={
-        status.HTTP_400_BAD_REQUEST: {"model": ErrorResponse, "description": "Parámetros inválidos"},
-        status.HTTP_401_UNAUTHORIZED: {"model": ErrorResponse, "description": "No autorizado"},
-        status.HTTP_500_INTERNAL_SERVER_ERROR: {"model": ErrorResponse, "description": "Error interno del servidor"}
+        status.HTTP_400_BAD_REQUEST: {"model": ErrorResponse},
+        status.HTTP_401_UNAUTHORIZED: {"model": ErrorResponse},
+        status.HTTP_500_INTERNAL_SERVER_ERROR: {"model": ErrorResponse}
     }
 )
 
 # Variables de entorno
-VERIFY_TOKEN = os.getenv("META_VERIFY_TOKEN", "aEpi35bfwk8emyCR2ZDdcv19PlrN06xA")
+VERIFY_TOKEN = os.getenv("META_VERIFY_TOKEN")
 WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN")
 WHATSAPP_PHONE_NUMBER_ID = os.getenv("WHATSAPP_PHONE_NUMBER_ID")
-WHATSAPP_VERSION = os.getenv("WHATSAPP_API_VERSION", "v23.0")
+WHATSAPP_VERSION = os.getenv("WHATSAPP_API_VERSION", "v17.0")
 
 @router.get(
     "/webhook",
@@ -64,31 +64,25 @@ WHATSAPP_VERSION = os.getenv("WHATSAPP_API_VERSION", "v23.0")
     }
 )
 async def verificar_webhook(
-    request: Request,
-    mode: str = Query(..., alias="hub.mode", description="Modo de verificación (debe ser 'subscribe')"),
-    token: str = Query(..., alias="hub.verify_token", description="Token de verificación"),
-    challenge: str = Query(..., alias="hub.challenge", description="Challenge para la verificación")
+    mode: str = Query(..., alias="hub.mode"),
+    token: str = Query(..., alias="hub.verify_token"),
+    challenge: str = Query(..., alias="hub.challenge")
 ):
-    logger.info(f"Token recibido: {token}")
-    logger.info(f"Token esperado: {VERIFY_TOKEN}")
-    logger.info(f"Modo: {mode}")
-    logger.info(f"Challenge: {challenge}")
+    logger.info(f"🔐 Verificando webhook: mode={mode}, token={token}")
 
     if mode == "subscribe" and token == VERIFY_TOKEN:
-        logger.info("✅ Webhook verificado correctamente con Meta.")
-        # Devolver SOLO el challenge como texto plano
+        logger.info("✅ Webhook verificado correctamente.")
         return PlainTextResponse(content=challenge)
     else:
-        error_msg = f"❌ Verificación fallida del webhook. Token válido: {token == VERIFY_TOKEN}, Modo correcto: {mode == 'subscribe'}"
-        logger.warning(error_msg)
+        logger.warning("❌ Verificación fallida del webhook.")
         return PlainTextResponse(content="Forbidden", status_code=403)
 
 @router.post("/webhook")
 async def recibir_mensaje(payload: dict = Body(...)):
     """
     Webhook para recibir mensajes de WhatsApp.
-    
-    Ejemplo de payload esperado:
+
+    Estructura esperada:
     {
       "object": "whatsapp_business_account",
       "entry": [{
@@ -120,109 +114,172 @@ async def recibir_mensaje(payload: dict = Body(...)):
     try:
         logger.info("📩 Inicio de procesamiento de webhook")
         logger.info(f"📦 Payload recibido: {payload}")
-        
-        # Verificar si es un mensaje de WhatsApp Business
+
         if payload.get("object") != "whatsapp_business_account":
-            logger.warning("❌ No es un mensaje de WhatsApp Business, ignorando...")
-            return {"status": "ok"}
-            
-        # Extraer el primer entry y changes
-        entries = payload.get("entry", [])
-        logger.info(f"📋 Número de entradas: {len(entries)}")
-        
-        if not entries:
-            logger.warning("⚠️ No hay entradas en el payload")
-            return {"status": "ok"}
-            
-        entry = entries[0]
-        changes = entry.get("changes", [])
-        logger.info(f"🔄 Número de cambios: {len(changes)}")
-        
-        if not changes:
-            logger.warning("⚠️ No hay cambios en la entrada")
-            return {"status": "ok"}
-            
-        change = changes[0]
-        
-        # Verificar si es un mensaje
-        if change.get("field") != "messages":
-            logger.info(f"ℹ️ No es un mensaje, campo: {change.get('field')}")
-            return {"status": "ok"}
-            
+            logger.warning("❌ Payload no corresponde a WhatsApp Business")
+            return {"status": "ignored"}
+
+        entry = payload.get("entry", [])[0]
+        change = entry.get("changes", [])[0]
         value = change.get("value", {})
         messages = value.get("messages", [])
-        logger.info(f"💬 Número de mensajes: {len(messages)}")
-        
+
         if not messages:
-            logger.info("ℹ️ No hay mensajes en el payload")
+            logger.info("ℹ️ No se encontraron mensajes en el payload.")
             return {"status": "ok"}
-        
-        # Verificar si hay mensajes
-        if not messages:
-            logger.info("No hay mensajes en el payload")
-            return {"status": "ok"}
-            
+
         mensaje = messages[0]
-        
-        # Verificar si es un mensaje de texto
-        if mensaje.get("type") != "text":
-            logger.warning(f"Tipo de mensaje no soportado: {mensaje.get('type')}")
-            return {"status": "error", "message": "Solo se soportan mensajes de texto"}
-            
+        tipo = mensaje.get("type")
         numero = mensaje.get("from")
-        texto = mensaje.get("text", {}).get("body")
-        
-        if not all([numero, texto]):
-            logger.error(f"Faltan campos requeridos en el mensaje: {mensaje}")
-            return {"status": "error", "message": "Faltan campos requeridos en el mensaje"}
-        
-        logger.info(f"📱 Mensaje recibido de {numero}: {texto}")
-        
-        # Guardar el mensaje del usuario en el historial
-        guardar_contexto(numero, f"Usuario: {texto}")
-        
-        # Obtener el historial de la conversación
-        contexto = obtener_contexto(numero)
-        logger.info(f"📚 Contexto de la conversación: {contexto}")
-        
-        # Generar respuesta con IA incluyendo el contexto
-        respuesta = get_response_from_openai(f"{contexto}\nUsuario: {texto}")
-        
-        # Guardar la respuesta en el historial
-        guardar_contexto(numero, f"Asistente: {respuesta}")
-        
-        # Enviar respuesta por WhatsApp
-        url = f"https://graph.facebook.com/{WHATSAPP_VERSION}/{WHATSAPP_PHONE_NUMBER_ID}/messages"
-        headers = {
-            "Authorization": f"Bearer {WHATSAPP_TOKEN}",
-            "Content-Type": "application/json"
-        }
-        
-        # Estructura simplificada según la documentación
-        data = {
-            "messaging_product": "whatsapp",
-            "to": numero,
-            "type": "text",
-            "text": {
-                "preview_url": False,
-                "body": respuesta
+
+        # ==============================
+        # MENSAJES DE TEXTO
+        # ==============================
+        if tipo == "text":
+            texto = mensaje.get("text", {}).get("body")
+            
+            if not all([numero, texto]):
+                logger.error(f"Faltan campos requeridos en el mensaje: {mensaje}")
+                return {"status": "error", "message": "Faltan campos requeridos en el mensaje"}
+
+            logger.info(f"📱 Mensaje de texto recibido de {numero}: {texto}")
+
+            # Guardar y obtener contexto
+            guardar_contexto(numero, f"Usuario: {texto}")
+            contexto = obtener_contexto(numero)
+            logger.info(f"📚 Contexto de la conversación: {contexto}")
+
+            # Verificar si hay documentos cargados
+            doc_info = obtener_contexto(f"doc_{numero}")
+            contexto_documentos = ""
+            
+            if doc_info:
+                try:
+                    # Buscar en los documentos cargados
+                    resultados = buscar_en_documentos(texto, numero)
+                    if resultados:
+                        contexto_documentos = "\n\nInformación relevante de documentos:\n" + "\n".join(
+                            f"- {res['texto'][:200]}..." for res in resultados[:3]  # Mostrar solo los 3 primeros
+                        )
+                except Exception as e:
+                    logger.error(f"Error buscando en documentos: {str(e)}")
+            
+            # Generar respuesta con IA incluyendo contexto de documentos
+            respuesta = get_response_from_openai(
+                f"{contexto}{contexto_documentos}\n\nPregunta del usuario: {texto}"
+            )
+            guardar_contexto(numero, f"Usuario: {texto}\nAsistente: {respuesta}")
+
+            # Enviar respuesta
+            url = f"https://graph.facebook.com/{WHATSAPP_VERSION}/{WHATSAPP_PHONE_NUMBER_ID}/messages"
+            headers = {
+                "Authorization": f"Bearer {WHATSAPP_TOKEN}",
+                "Content-Type": "application/json"
             }
-        }
-        
-        logger.info("📤 Enviando mensaje a WhatsApp API")
-        logger.debug(f"URL: {url}")
-        logger.debug(f"Headers: {headers}")
-        logger.debug(f"Payload: {data}")
-        logger.info(f"Data: {data}")
-        
-        response = requests.post(url, headers=headers, json=data)
-        logger.info(f"Respuesta de WhatsApp API: {response.status_code} - {response.text}")
-        
-        response.raise_for_status()
-        logger.info(f"Respuesta enviada exitosamente a {numero}")
-        
+            data = {
+                "messaging_product": "whatsapp",
+                "to": numero,
+                "type": "text",
+                "text": {
+                    "preview_url": False,
+                    "body": respuesta
+                }
+            }
+
+            logger.info("📤 Enviando mensaje a WhatsApp API")
+            logger.debug(f"URL: {url}")
+            logger.debug(f"Headers: {headers}")
+            logger.debug(f"Payload: {data}")
+
+            response = requests.post(url, headers=headers, json=data)
+            logger.info(f"Respuesta de WhatsApp API: {response.status_code} - {response.text}")
+            response.raise_for_status()
+            logger.info(f"✅ Respuesta enviada exitosamente a {numero}")
+
+        # ==============================
+        # MENSAJES CON DOCUMENTOS (PDF)
+        # ==============================
+        elif tipo == "document":
+            documento = mensaje.get("document", {})
+            media_id = documento.get("id")
+            filename = documento.get("filename", "archivo.pdf")
+
+            if not media_id:
+                logger.warning("📎 Documento recibido sin media_id")
+                return {"status": "ok"}
+
+            logger.info(f"📎 Documento recibido de {numero}: {filename} (media_id: {media_id})")
+
+            # Paso 1: Obtener URL temporal
+            media_info_url = f"https://graph.facebook.com/{WHATSAPP_VERSION}/{media_id}"
+            headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
+            media_response = requests.get(media_info_url, headers=headers)
+            media_url = media_response.json().get("url")
+
+            if not media_url:
+                logger.error("❌ No se pudo obtener la URL del documento")
+                return {"status": "error", "message": "Error al obtener documento"}
+
+            # Paso 2: Descargar archivo
+            archivo = requests.get(media_url, headers=headers)
+            ruta_local = f"./archivos/{filename}"
+            os.makedirs("./archivos", exist_ok=True)
+            with open(ruta_local, "wb") as f:
+                f.write(archivo.content)
+
+            logger.info(f"📥 Documento guardado en: {ruta_local}")
+            # Procesar el PDF y cargarlo a Qdrant
+            try:
+                # Asignar un ID único al documento
+                doc_id = str(uuid.uuid4())
+                # Cargar el PDF a Qdrant
+                cargar_pdf_a_qdrant(ruta_local, numero)
+                
+                # Guardar información del documento en el contexto
+                guardar_contexto(
+                    f"doc_{numero}", 
+                    json.dumps({
+                        "documento": filename,
+                        "fecha": datetime.now().isoformat()
+                    })
+                )
+                
+                # Enviar confirmación al usuario
+                mensaje_respuesta = f"✅ Documento '{filename}' procesado correctamente. Ya puedes hacer preguntas sobre él."
+                
+            except Exception as e:
+                logger.error(f"Error procesando PDF: {str(e)}", exc_info=True)
+                mensaje_respuesta = "❌ Lo siento, hubo un error al procesar el documento. Por favor, inténtalo de nuevo."
+            
+            # Enviar respuesta al usuario
+            url = f"https://graph.facebook.com/{WHATSAPP_VERSION}/{WHATSAPP_PHONE_NUMBER_ID}/messages"
+            headers = {
+                "Authorization": f"Bearer {WHATSAPP_TOKEN}",
+                "Content-Type": "application/json"
+            }
+            data = {
+                "messaging_product": "whatsapp",
+                "to": numero,
+                "type": "text",
+                "text": {
+                    "body": mensaje_respuesta
+                }
+            }
+            
+            response = requests.post(url, headers=headers, json=data)
+            response.raise_for_status()
+            
+            return {"status": "documento_procesado", "archivo": filename}
+
+        # ==============================
+        # OTRO TIPO DE MENSAJE
+        # ==============================
+        else:
+            logger.info(f"🪪 Tipo de mensaje no soportado aún: {tipo}")
+            return {"status": "unsupported", "type": tipo}
+
     except Exception as e:
-        logger.error(f"Error: {str(e)}")
+        logger.error(f"❌ Error procesando webhook: {str(e)}", exc_info=True)
         return {"status": "error", "message": str(e)}
-        
+
     return {"status": "ok"}
