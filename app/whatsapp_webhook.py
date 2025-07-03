@@ -6,10 +6,12 @@ import logging
 import requests
 from dotenv import load_dotenv
 from pydantic import BaseModel
-from app.openai_service import get_response_from_openai, get_embedding_from_openai
+from app.openai_service import get_response_from_openai
 from app.redis_service import guardar_contexto, obtener_contexto
 from app.vector_service import cargar_pdf_a_qdrant, buscar_en_documentos
 import uuid
+import json
+from datetime import datetime
 
 # Modelos Pydantic para documentación
 class WebhookVerificationResponse(BaseModel):
@@ -222,8 +224,8 @@ async def recibir_mensaje(payload: dict = Body(...)):
 
             # Paso 2: Descargar archivo
             archivo = requests.get(media_url, headers=headers)
-            ruta_local = f"./archivos/{filename}"
-            os.makedirs("./archivos", exist_ok=True)
+            ruta_local = f"./{os.getenv('QDRANT_COLLECTION')}/{filename}"
+            os.makedirs(f"./{os.getenv('QDRANT_COLLECTION')}", exist_ok=True)
             with open(ruta_local, "wb") as f:
                 f.write(archivo.content)
 
